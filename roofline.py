@@ -37,7 +37,7 @@ except ImportError:
     sys.exit(1)
 
 if len(sys.argv) < 2:
-    print('Usage: "python {} path_to_project_dir"'.format(__file__))
+    print('Usage: "python {} path_to_project_dir <num_cores>"'.format(__file__))
     sys.exit(2)
 
 project = advisor.open_project(sys.argv[1])
@@ -47,12 +47,20 @@ tot_elapsed_time=float(next(data.topdown).total_elapsed_time)
 print(tot_elapsed_time)
 
 rows = [{col: row[col] for col in row} for row in data.bottomup]
-#temp_row=rows[0]
-#for key in temp_row:
-#    print(key, temp_row[key])
 
-#roofs = data.get_roofs()
-roofs = data.get_roofs(1, advisor.RoofsStrategy.SINGLE_THREAD)
+#set number of cores (or number of threads)
+num_cores = 1
+
+if len(sys.argv) == 3:
+    num_cores = int(sys.argv[2])
+
+if num_cores == 1:
+    roofs = data.get_roofs(1, advisor.RoofsStrategy.SINGLE_THREAD)
+else:
+    roofs = data.get_roofs(num_cores, advisor.RoofsStrategy.MULTI_THREAD)
+
+
+# roofs = data.get_roofs()
 
 df = pd.DataFrame(rows).replace('', np.nan)
 df.self_elapsed_time=df.self_elapsed_time.astype(float)
@@ -63,16 +71,14 @@ aggregation_functions = {'function_call_sites_and_loops': 'first', 'self_elapsed
     'self_gflop': 'sum', 'self_ai': 'first'}
 df = df.groupby(['function_call_sites_and_loops','self_ai']).aggregate(aggregation_functions)
 
-#df['weight']= df.self_elapsed_time.astype(float)/tot_elapsed_time*100
 df.self_ai = df.self_ai.astype(float)
-#df.self_gflops = df.self_gflops.astype(float)
 
 #filter out NaN inplace
 df.dropna(subset=['self_ai'],inplace=True)
 df=df.loc[df['self_ai'] > 1.e-8]
 
 df['weight']= df.self_elapsed_time/tot_elapsed_time*100
-df['marker_size'] = df.apply(lambda row: max(30,row.weight*120.), axis = 1) 
+df['marker_size'] = df.apply(lambda row: max(30,row.weight*30), axis = 1) 
 df['self_gflops']= df.self_gflop/df.self_elapsed_time
 
 # take only weight > 5%
@@ -83,8 +89,7 @@ print(df[['weight','self_ai','self_gflops']])
 
 #print(df[['function_call_sites_and_loops','self_elapsed_time','weight','self_ai', 'self_gflop','self_gflops']].dropna())
 
-#width = df.self_ai.max() * 1.2
-width=100
+width=1000
 
 fig,ax = plt.subplots()
 
@@ -93,43 +98,53 @@ max_compute_bandwidth = max_compute_roof.bandwidth // math.pow(10, 9)  # convert
 
 for roof in roofs:
     # by default drawing multi threaded roofs only
-    #remove '(single-threaded)'
-    roof_trunc = roof.name.replace(' (single-threaded)','')
- #  if 'single-thread' not in roof.name:
-    if 1==1:
+    roof_trunc = roof.name
+    if num_cores == 1:
+        #remove '(single-threaded)'
+        roof_trunc = roof_trunc.replace(' (single-threaded)','')
         # memory roofs
-        #if 'bandwidth' in roof.name.lower():
-        if roof_trunc == 'DRAM Bandwidth':
-            bandwidth = roof.bandwidth / math.pow(10, 9) # converting to GByte/s
-            bw_label = '{} {:.0f} GB/s'.format(roof_trunc, bandwidth)
-        # compute roofs
-        if roof_trunc in gflops_roof_names:
-            gflops = roof.bandwidth / math.pow(10, 9)  # converting to GFlOPS
-            if roof_trunc=='DP Vector FMA Peak':
-                gflops_dp_fma=gflops
-            x1, x2 = gflops/bandwidth, width
-            y1, y2 = gflops, gflops
-            label = '{} {:.0f} GFLOPS'.format(roof_trunc, gflops)
-            ax.annotate(label, xy=(width, y1), xytext=(-5,4), textcoords="offset points",horizontalalignment='right')
-            ax.plot([x1, x2], [y1, y2], '-', label=label,color='black')
+    if roof_trunc == 'DRAM Bandwidth':
+        bandwidth = roof.bandwidth / math.pow(10, 9) # converting to GByte/s
+        bw_label = '{} {:.0f} GB/s'.format(roof_trunc, bandwidth)
+    # compute roofs
+    if roof_trunc in gflops_roof_names:
+        gflops = roof.bandwidth / math.pow(10, 9)  # converting to GFlOPS
+        if roof_trunc=='DP Vector FMA Peak':
+            gflops_dp_fma=gflops
+        if roof_trunc=='Scalar Add Peak':
+            gflops_scalar_add=gflops
+        x1, x2 = gflops/bandwidth, width
+        y1, y2 = gflops, gflops
+        label = '{} {:.0f} GFLOPS'.format(roof_trunc, gflops)
+        ax.annotate(label, xy=(width, y1), xytext=(-5,4), textcoords="offset points",horizontalalignment='right')
+        ax.plot([x1, x2], [y1, y2], '-', label=label,color='black')
+        ax.plot([0, x1], [y1, y2], '--', label=label,color='black')
 
 
 #plot BW roofline
-# y = banwidth * x
-#x1, x2 = 0, int(min(width, max_compute_bandwidth / bandwidth))
 x1, x2 = 0, gflops_dp_fma/bandwidth
-#y1, y2 = 0, int(x2 * bandwidth)
 y1, y2 = 0, gflops_dp_fma
 angle_data = np.rad2deg(np.arctan2(y2-y1, x2-x1))
 
 ax.plot([x1, x2], [y1, y2], '-',color='red')
+
+ylim0=1e-2
+#plot different regions of bound type
+x1, x2 = gflops_scalar_add/bandwidth, gflops_scalar_add/bandwidth
+y1, y2 = ylim0,bandwidth*x2
+ax.plot([x1, x2], [y1, y2], '--', color='red')
+ax.annotate('Memory bound', xy=(x2, ylim0), xytext=(-5,35), textcoords="offset points",horizontalalignment='right',color='red',fontsize=12)
+x1, x2 = gflops_dp_fma/bandwidth, gflops_dp_fma/bandwidth
+y1, y2 = ylim0, gflops_dp_fma
+ax.plot([x1, x2], [y1, y2], '--', color='red')
+ax.annotate('Compute bound', xy=(x2, ylim0), xytext=(+5,35), textcoords="offset points",horizontalalignment='left',color='red',fontsize=12)
 
 ax.tick_params(which='major',labelsize=14,length=6)
 ax.tick_params(which='minor',labelsize=14,length=3) 
 # drawing points using the same ax
 ax.set_xscale('log', nonposx='clip')
 ax.set_yscale('log', nonposy='clip')
-ax.set(ylim=(1e-2, 5e+2), xlim=(1e-3, width))
+ax.set(ylim=(ylim0, 1e+3), xlim=(1e-3, width))
 ax.set_xlabel('Arithmetic intensity [FLOP/byte]',fontsize=14)
 ax.set_ylabel('Performance [GFLOP/sec]',fontsize=14)
 
@@ -137,7 +152,7 @@ ax.set_axisbelow(True)
 ax.yaxis.grid(color='gray', linestyle='dashed')
 ax.xaxis.grid(color='gray', linestyle='dashed')
 
-sc=ax.scatter(df.self_ai, df.self_gflops, c=df.weight, s=df.marker_size, alpha=0.5, 
+sc=ax.scatter(df.self_ai, df.self_gflops, c=df.weight, s=df.marker_size, alpha=0.6, 
     linewidths=0.7,edgecolors='black',
     cmap='rainbow')
 #sc=ax.scatter(df.self_ai, df.self_gflops, s=10)
@@ -151,7 +166,7 @@ bw_label_loc = np.array((0.001, bandwidth*0.001))
 angle_screen = ax.transData.transform_angles(np.array((angle_data,)), 
                                  bw_label_loc.reshape((1, 2)))[0]
 # using `annotate` allows to specify an offset in units of points
-ax.annotate(bw_label, xy=(bw_label_loc[0], bw_label_loc[1]), xytext=(10,20), textcoords="offset points", 
+ax.annotate(bw_label, xy=(bw_label_loc[0], bw_label_loc[1]), xytext=(10,15), textcoords="offset points", 
                 rotation_mode='anchor', rotation=angle_screen)
 
 #plt.legend(loc='lower right', fancybox=True, prop={'size': 6})
